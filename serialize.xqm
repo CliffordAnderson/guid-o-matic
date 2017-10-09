@@ -42,7 +42,7 @@ let $columnInfo := fn:collection($db)//column-index/record
 let $namespaces := fn:collection($db)//namespaces/record
 let $classes := fn:collection($db)//base-classes/record
 let $linkedClasses := fn:collection($db)//linked-classes/record
-let $metadata := fn:collection($db)//metadata/record
+let $metadata := fn:collection($db)/metadata/record
 let $linkedMetadata := fn:collection($db)//linked-metadata/file
   
 (: The main function returns a single string formed by concatenating all of the assembled pieces of the document :)
@@ -132,6 +132,7 @@ let $linkedMetadata :=
           $class/suffix1,
           $class/link_characters,
           $class/suffix2,
+          $class/forward_link,
           $class/class,
           <classes>{
             $xmlClassClasses/csv/record
@@ -232,6 +233,7 @@ let $linkedMetadata :=
           $class/suffix1,
           $class/link_characters,
           $class/suffix2,
+          $class/forward_link,
           $class/class,
           <classes>{
             $xmlClassClasses/csv/record
@@ -261,7 +263,7 @@ declare function serialize:find-db($id,$db)
 let $constants := fn:collection($db)//constants/record
 let $baseIriColumn := $constants//baseIriColumn/text()
 
-let $metadata := fn:collection($db)//metadata/record
+let $metadata := fn:collection($db)/metadata/record
   
 return 
       (: each record in the database must be checked for a match to the requested URI :)
@@ -270,30 +272,47 @@ return
       return true()      
 };
 
+(:--------------------------------------------------------------------------------------------------:)
+
 declare function serialize:generate-entire-document($id,$linkedMetadata,$metadata,$domainRoot,$classes,$columnInfo,$serialization,$namespaces,$constants,$singleOrDump,$baseIriColumn,$modifiedColumn)
 {
 concat( 
   (: the namespace abbreviations only needs to be generated once for the entire document :)
   serialize:list-namespaces($namespaces,$serialization),
-  string-join( 
-    if ($singleOrDump = "dump")
-    then
-      (: this case outputs every record in the database :)
-      for $record in $metadata
-      let $baseIRI := $domainRoot||$record/*[local-name()=$baseIriColumn]/text()
-      let $modified := $record/*[local-name()=$modifiedColumn]/text()
-      return serialize:generate-a-record($record,$linkedMetadata,$baseIRI,$domainRoot,$modified,$classes,$columnInfo,$serialization,$namespaces,$constants)
-    else
-      (: for a single record, each record in the database must be checked for a match to the requested URI :)
-      for $record in $metadata
-      where $record/*[local-name()=$baseIriColumn]/text()=$id
-      let $baseIRI := $domainRoot||$record/*[local-name()=$baseIriColumn]/text()
-      let $modified := $record/*[local-name()=$modifiedColumn]/text()
-      return serialize:generate-a-record($record,$linkedMetadata,$baseIRI,$domainRoot,$modified,$classes,$columnInfo,$serialization,$namespaces,$constants)      
-    ),
+  if($serialization = 'json')
+  then
+    (: When each each resource description in each record is generated as json, it has a trailing comma.  The last one must be removed before closing the container for the array and document :)
+    serialize:remove-last-comma(serialize:generate-records($id,$linkedMetadata,$metadata,$domainRoot,$classes,$columnInfo,$serialization,$namespaces,$constants,$singleOrDump,$baseIriColumn,$modifiedColumn))
+  else 
+    serialize:generate-records($id,$linkedMetadata,$metadata,$domainRoot,$classes,$columnInfo,$serialization,$namespaces,$constants,$singleOrDump,$baseIriColumn,$modifiedColumn)
+  ,
   serialize:close-container($serialization) 
   ) 
 };
+
+(:--------------------------------------------------------------------------------------------------:)
+
+declare function serialize:generate-records($id,$linkedMetadata,$metadata,$domainRoot,$classes,$columnInfo,$serialization,$namespaces,$constants,$singleOrDump,$baseIriColumn,$modifiedColumn)
+{
+string-join( 
+  if ($singleOrDump = "dump")
+  then
+    (: this case outputs every record in the database :)
+    for $record in $metadata
+    let $baseIRI := $domainRoot||$record/*[local-name()=$baseIriColumn]/text()
+    let $modified := $record/*[local-name()=$modifiedColumn]/text()
+    return serialize:generate-a-record($record,$linkedMetadata,$baseIRI,$domainRoot,$modified,$classes,$columnInfo,$serialization,$namespaces,$constants)
+  else
+    (: for a single record, each record in the database must be checked for a match to the requested URI :)
+    for $record in $metadata
+    where $record/*[local-name()=$baseIriColumn]/text()=$id
+    let $baseIRI := $domainRoot||$record/*[local-name()=$baseIriColumn]/text()
+    let $modified := $record/*[local-name()=$modifiedColumn]/text()
+    return serialize:generate-a-record($record,$linkedMetadata,$baseIRI,$domainRoot,$modified,$classes,$columnInfo,$serialization,$namespaces,$constants)
+  )  
+};
+
+(:--------------------------------------------------------------------------------------------------:)
 
 declare function serialize:generate-a-record($record,$linkedMetadata,$baseIRI,$domainRoot,$modified,$classes,$columnInfo,$serialization,$namespaces,$constants)
 {
@@ -315,29 +334,67 @@ declare function serialize:generate-a-record($record,$linkedMetadata,$baseIRI,$d
             let $suffix1 := $linkedClass/suffix1/text()
             let $linkCharacters := $linkedClass/link_characters/text()
             let $suffix2 := $linkedClass/suffix2/text()
-            let $linkedClassType := $linkedClass/class/text()
+            let $forwardLink :=
+                  if ( exists($linkedClass/forward_link/text()) )
+                  then $linkedClass/forward_link/text()
+                  else "null"
             
             for $linkedClassRecord in $linkedClass/metadata/record
             where $baseIRI=$domainRoot||$linkedClassRecord/*[local-name()=$linkColumn]/text()
             
-            (: generate an IRI or bnode for the instance of the linked class based on the convention for that class :)
+            (: generate an IRI or bnode for the instance of the linked class based on the convention for that class. 
+            If the value of $linkCharacters is "http", then use the value in the $suffix1 column as the URI of the linked class instance :)
             let $linkedClassIRI := 
-                if (fn:substring($suffix1,1,2)="_:")
-                then 
-                    concat("_:",random:uuid() )
-                else
-                    $baseIRI||"#"||$linkedClassRecord/*[local-name()=$suffix1]/text()||$linkCharacters||$linkedClassRecord/*[local-name()=$suffix2]/text()
-            let $linkedIRIs := serialize:construct-iri($linkedClassIRI,$linkedClass/classes/record)
-            let $extraTriple := propvalue:iri($linkProperty,$baseIRI,$serialization,$namespaces)
-            for $linkedModifiedClass in $linkedIRIs
-            return
-               serialize:describe-resource($linkedIRIs,$linkedClass/mapping/record,$linkedClassRecord,$linkedModifiedClass,$serialization,$namespaces,$extraTriple) 
-          )
-          ,
-          
-          (: The document description is done once for each record. :)
-          serialize:describe-document($baseIRI,$modified,$serialization,$namespaces,$constants)
-        
+                    if (fn:substring($suffix1,1,2)="_:")
+                    then
+                        concat("_:",random:uuid() )
+                    else
+                            if ($linkCharacters="http")
+                            then
+                                $linkedClassRecord/*[local-name()=$suffix1]/text()
+                            else
+                            $baseIRI||"#"||$linkedClassRecord/*[local-name()=$suffix1]/text()||$linkCharacters||$linkedClassRecord/*[local-name()=$suffix2]/text()
+            return (
+                    (: Construct the descriptions of the linked class instances :)
+                    let $linkedIRIs := serialize:construct-iri($linkedClassIRI,$linkedClass/classes/record)
+                    let $extraTriple := if ($linkProperty = "null")
+                                        then ""
+                                        else
+                                            (: The $extraTriple makes the backlink from the linked resource to the root class :)
+                                            propvalue:iri($linkProperty,$baseIRI,$serialization,$namespaces)
+                    for $linkedModifiedClass in $linkedIRIs
+                    return
+                       serialize:describe-resource($linkedIRIs,$linkedClass/mapping/record,$linkedClassRecord,$linkedModifiedClass,$serialization,$namespaces,$extraTriple)
+                    ,
+                    (: This provides an option to create a forward link from the root class resource to the linked resource:)
+                    if ($forwardLink = "null")
+                    then ()
+                    else
+                      (: construct a single triple :)
+                      concat(
+                            (: the last-item function removes trailing delimiters if necessary for a serialization :)
+                            serialize:last-item(concat(
+                                  propvalue:subject($baseIRI,$serialization),
+                                  propvalue:iri($forwardLink,$linkedClassIRI,$serialization,$namespaces)
+                                  )
+                                  , $serialization),
+                            (: The propvalue:type function with "null" type simply closes the container appropriately for the serialization. :)
+                            propvalue:type("null",$serialization,$namespaces),
+                            (: each described resource must be separated by a comma in JSON. If a resource is the last described in the the array, the trailing comma will be removed after they are all concatenated. :)
+                            if ($serialization="json")
+                            then ",&#10;"
+                            else ""
+                            )
+                    )
+            )
+            ,
+            
+            (: The document description is done once for each record. Suppress if the document class has a value of "null" :)
+            if ($constants//documentClass/text() = "null")
+            then
+              ()
+            else
+              serialize:describe-document($baseIRI,$modified,$serialization,$namespaces,$constants)
 };
 
 (:--------------------------------------------------------------------------------------------------:)
@@ -346,7 +403,9 @@ declare function serialize:describe-document($baseIRI,$modified,$serialization,$
 {
   let $type := $constants//documentClass/text()
   let $suffix := propvalue:extension($serialization)
-  let $iri := concat($baseIRI,$suffix)
+  (: If the URI ends in a slash, e.g. http://example.org/ex/, then remove the trailing slash before appending the suffix. :)
+  (: I.e. http://example.org/ex.ttl, not http://example.org/ex/.ttl :)
+  let $iri := concat(serialize:remove-trailing-slash($baseIRI),$suffix)
   return concat(
     propvalue:subject($iri,$serialization),
     propvalue:plain-literal("dc:format",propvalue:media-type($serialization),$serialization),
@@ -359,8 +418,25 @@ declare function serialize:describe-document($baseIRI,$modified,$serialization,$
     if ($modified)
     then propvalue:datatyped-literal("dcterms:modified",$modified,"xsd:dateTime",$serialization,$namespaces)
     else "",
-    propvalue:type($type,$serialization,$namespaces)
+    propvalue:type($type,$serialization,$namespaces),
+    
+    (: each described resource must be separated by a comma in JSON. The final trailing comma for all resources will be removed after they are all concatenated. :)
+    if ($serialization="json")
+    then ",&#10;"
+    else ""
+
   )  
+};
+
+(:--------------------------------------------------------------------------------------------------:)
+
+declare function serialize:remove-trailing-slash($temp)
+{
+  if (fn:ends-with($temp, '/'))
+  then
+    fn:substring($temp,1,fn:string-length($temp)-1)
+  else
+    $temp
 };
 
 (:--------------------------------------------------------------------------------------------------:)
@@ -368,6 +444,32 @@ declare function serialize:describe-document($baseIRI,$modified,$serialization,$
 declare function serialize:remove-last-comma($temp)
 {
   concat(fn:substring($temp,1,fn:string-length($temp)-2),"&#10;")
+};
+
+(:--------------------------------------------------------------------------------------------------:)
+
+declare function serialize:replace-semicolon-with-period($temp)
+{
+  concat(fn:substring($temp,1,fn:string-length($temp)-2),".&#10;")
+};
+
+(:--------------------------------------------------------------------------------------------------:)
+
+(: if the last item in a property-value list is not followed by a type declaration, a trailing delimiter may need removal :)
+declare function serialize:last-item($propertyBlock, $serialization)
+{
+if ($serialization = 'json')
+then 
+  (: For JSON, only the trailing comma needs to be removed. :)
+  serialize:remove-last-comma($propertyBlock)
+else 
+    if ($serialization = 'turtle')
+    then
+        (: for Turtle, the trailing semicolon must be replaced with a final period :) 
+        serialize:replace-semicolon-with-period($propertyBlock)
+    else
+        (: for XML there are no trailing delimiters, so nothing to remove. :)
+        $propertyBlock
 };
 
 (:--------------------------------------------------------------------------------------------------:)
@@ -415,25 +517,34 @@ declare function serialize:curie-value-pairs($namespaces,$serialization)
 declare function serialize:describe-resource($IRIs,$columnInfo,$record,$class,$serialization,$namespaces,$extraTriple)
 {  
 (: Note: the propvalue:subject function sets up any string necessary to open the container, and the propvalue:type function closes the container :)
-  let $type := $class/class/text()
-  let $id := $class/id/text()
-  let $iri := $class/fullId/text()
-  return concat(
+let $type := $class/class/text()
+let $id := $class/id/text()
+let $iri := $class/fullId/text()
+let $propertyBlock := 
+  concat(
     propvalue:subject($iri,$serialization),
     string-join(serialize:property-value-pairs($IRIs,$columnInfo,$record,$id,$serialization,$namespaces)),
-
-(: make the backlink only for the instance of the primary class in a table :)
+    
+    (: make the backlink only for the instance of the primary class in a table :)
     if ($id="$root")
     then $extraTriple
     else ""
-    ,
-    propvalue:type($type,$serialization,$namespaces)
   )
+return (
+  if ($type = 'null')
+  then
+    (: if the type declaration is omitted, then delimiters may need to be removed from the last property/value pair :)
+    serialize:last-item($propertyBlock, $serialization)
+  else
+    (: if there is a type declaration, no action needed on removing delimiters :)
+    $propertyBlock
   ,
-  (: each described resource must be separated by a comma in JSON. The last described resource is the document, which isn't followed by a trailing comma :)
+  propvalue:type($type,$serialization,$namespaces),
+  (: each described resource must be separated by a comma in JSON. If a resource is the last described in the the array, the trailing comma will be removed after they are all concatenated. :)
   if ($serialization="json")
   then ",&#10;"
   else ""
+  )
 };
 
 (:--------------------------------------------------------------------------------------------------:)
@@ -499,7 +610,7 @@ switch ($serialization)
 
 declare function serialize:construct-iri($baseIRI,$classes)
 {
-  (: This function basically creates a parallel set of class records that contain the full URIs in addition to the abbreviated ones that are found in classes.csv . In addition, UUID blank node identifiers are generated for nodes that are anonymous.  UUIDs are used instead of sequential numbers since the main function may be hacked to serializa ALL records rather than just one and in that case using UUIDs would ensure that there is no duplication of blank node identifiers among records. :)
+  (: This function basically creates a parallel set of class records that contain the full URIs in addition to the abbreviated ones that are found in classes.csv . In addition, UUID blank node identifiers are generated for nodes that are anonymous.  UUIDs are used instead of sequential numbers since the main function may be hacked to serialize ALL records rather than just one and in that case using UUIDs would ensure that there is no duplication of blank node identifiers among records. :)
   for $class in $classes
   let $suffix := $class/id/text()
   return
